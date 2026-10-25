@@ -16,74 +16,133 @@ jobs:
       - name: egress
         run: echo "EGRESS_IP=$(curl -s https://api.ipify.org)"
 
-      - name: install mssql odbc
+      - name: install drivers
         run: |
-          set -e
           export DEBIAN_FRONTEND=noninteractive
+          sudo rm -f /etc/apt/sources.list.d/microsoft-*.list /etc/apt/sources.list.d/mssql-release.list
           curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
-          curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
-          sudo apt-get update -qq
-          sudo ACCEPT_EAGERLY=Y apt-get install -y -qq msodbcsql18 unixodbc-dev
-          odbcinst -q -d
-          python3 -m pip install --quiet pyodbc
+          echo "deb [arch=amd64,armhf,arm64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod/ jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/mssql-release.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0" || true
+          sudo ACCEPT_EAGERLY=Y apt-get install -y -qq msodbcsql18 unixodbc-dev || echo "ODBC_INSTALL_FAILED"
+          odbcinst -q -d || true
+          python3 -m pip install --quiet pyodbc pymssql || true
+          python3 -c "
+          try:
+              import pyodbc; print('pyodbc OK', pyodbc.version, pyodbc.drivers())
+          except Exception as e: print('pyodbc MISSING', e)
+          try:
+              import pymssql; print('pymssql OK', pymssql.__version__)
+          except Exception as e: print('pymssql MISSING', e)
+          "
 
       - name: validate
         env:
           PAYLOAD_B64: ${{ secrets.PAYLOAD_B64 }}
         run: |
-          set -e
           if [ -z "$PAYLOAD_B64" ]; then echo "TALLY {\"NO_SECRET\":1}"; exit 0; fi
           echo "$PAYLOAD_B64" | base64 -d > /tmp/payload.json
           python3 -c "import json;p=json.load(open('/tmp/payload.json'));print('entries',len(p))"
           cat > /tmp/val.py <<'PYEOF'
-          import json, time, sys
-          import pyodbc
+          import json, time, socket
           payload = json.load(open("/tmp/payload.json"))
           out = []
-          for item in payload:
-              srv = item["server"]
+          try:
+              import pyodbc
+              HAVE_ODBC = True
+          except Exception:
+              HAVE_ODBC = False
+          try:
+              import pymssql
+              HAVE_MSSQL = True
+          except Exception:
+              HAVE_MSSQL = False
+
+          def clean(srv):
+              srv = srv.strip()
               if srv.startswith("tcp:"):
                   srv = srv[4:]
               if srv.endswith(".database.secure.windows.net"):
                   srv = srv.replace(".database.secure.windows.net", ".database.windows.net")
-              rec = {"server": srv, "database": item["database"], "user": item["user"], "tag": item.get("tag","")}
+              return srv
+
+          for item in payload:
+              srv = clean(item["server"])
+              rec = {"server": srv, "database": item["database"], "user": item["user"],
+                     "tag": item.get("tag", "")}
               t0 = time.time()
-              try:
-                  cs = ("DRIVER={ODBC Driver 18 for SQL Server};"
-                        "SERVER=tcp:%s,1433;DATABASE=%s;UID=%s;PWD=%s;"
-                        "Encrypt=yes;TrustServerCertificate=yes;Connect Timeout=18;"
-                        "Login Timeout=18;Pooling=no" % (srv, item["database"], item["user"], item["password"]))
-                  cn = pyodbc.connect(cs, timeout=18, autocommit=True)
-                  cur = cn.cursor()
-                  cur.execute("SELECT DB_NAME(), SUSER_SNAME()")
-                  r = cur.fetchone()
-                  rec["status"] = "SUCCESS"
-                  rec["db"] = r[0]; rec["login"] = r[1]
+              status = None
+              err = ""
+              if HAVE_ODBC:
                   try:
-                      cur.execute("SELECT COUNT(*) FROM sys.tables")
-                      rec["tables"] = cur.fetchone()[0]
-                  except Exception:
-                      rec["tables"] = None
-                  cn.close()
-              except Exception as e:
-                  m = str(e)
-                  if "40615" in m or "not allowed to access the server" in m:
-                      rec["status"] = "FIREWALL_40615"
-                  elif "18456" in m or "Login failed" in m:
-                      rec["status"] = "18456_LOGIN_FAILED"
-                  elif "Cannot open server" in m:
-                      rec["status"] = "SERVER_OPEN_FAILED"
-                  elif "timeout" in m.lower():
-                      rec["status"] = "TIMEOUT"
-                  else:
-                      rec["status"] = "OTHER"
-                  rec["err"] = m[:150]
+                      cs = ("DRIVER={ODBC Driver 18 for SQL Server};"
+                            "SERVER=tcp:%s,1433;DATABASE=%s;UID=%s;PWD=%s;"
+                            "Encrypt=yes;TrustServerCertificate=yes;Connect Timeout=18;"
+                            "Login Timeout=18;Pooling=no"
+                            % (srv, item["database"], item["user"], item["password"]))
+                      cn = pyodbc.connect(cs, timeout=18, autocommit=True)
+                      cur = cn.cursor()
+                      cur.execute("SELECT DB_NAME(), SUSER_SNAME()")
+                      r = cur.fetchone()
+                      rec["status"] = "SUCCESS"
+                      rec["driver"] = "odbc"
+                      rec["db"] = r[0]
+                      rec["login"] = r[1]
+                      try:
+                          cur.execute("SELECT COUNT(*) FROM sys.tables")
+                          rec["tables"] = cur.fetchone()[0]
+                      except Exception:
+                          rec["tables"] = None
+                      cn.close()
+                      status = "SUCCESS"
+                  except Exception as e:
+                      m = str(e)
+                      err = m[:170]
+                      if "40615" in m or "not allowed to access the server" in m:
+                          status = "FIREWALL_40615"
+                      elif "18456" in m or "Login failed" in m:
+                          status = "18456_LOGIN_FAILED"
+                      elif "Cannot open server" in m:
+                          status = "SERVER_OPEN_FAILED"
+                      elif "timeout" in m.lower():
+                          status = "TIMEOUT"
+                      else:
+                          status = "OTHER"
+              if status != "SUCCESS" and HAVE_MSSQL:
+                  try:
+                      cn = pymssql.connect(server=srv, port="1433", user=item["user"],
+                                            password=item["password"], database=item["database"],
+                                            timeout=18, login_timeout=18, tds_version="7.4")
+                      cur = cn.cursor()
+                      cur.execute("SELECT DB_NAME(), SUSER_SNAME()")
+                      r = cur.fetchone()
+                      rec["status"] = "SUCCESS"
+                      rec["driver"] = "pymssql"
+                      rec["db"] = r[0]
+                      rec["login"] = r[1]
+                      cn.close()
+                      status = "SUCCESS"
+                      err = ""
+                  except Exception as e:
+                      m = str(e)
+                      err = (err + " | pymssql: " + m[:150])[:300]
+                      if status == "OTHER":
+                          if "40615" in m:
+                              status = "FIREWALL_40615"
+                          elif "18456" in m or "Login failed" in m:
+                              status = "18456_LOGIN_FAILED"
+              if status:
+                  rec["status"] = status
+              if err:
+                  rec["err"] = err
               rec["secs"] = round(time.time() - t0, 1)
               print("RESULT " + json.dumps(rec), flush=True)
               out.append(rec)
-          with open("/tmp/results.json","w") as f:
+          with open("/tmp/results.json", "w") as f:
               json.dump(out, f)
-          print("TALLY " + json.dumps({s: sum(1 for x in out if x["status"] == s) for s in set(x["status"] for x in out)}), flush=True)
+          tally = {}
+          for x in out:
+                  tally[x["status"]] = tally.get(x["status"], 0) + 1
+          print("TALLY " + json.dumps(tally), flush=True)
           PYEOF
           python3 /tmp/val.py
           python3 -c "
@@ -97,7 +156,7 @@ jobs:
           cat /tmp/results.json
           echo '---END---'
           {
-            echo '## Artifact'
+            echo '## Azure SQL credential validation'
             echo '```json'
             cat /tmp/results.json
             echo '```'
