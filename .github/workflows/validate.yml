@@ -3,10 +3,10 @@ name: azure-sql-validate
 on:
   workflow_dispatch:
     inputs:
-      payload:
-        description: 'JSON payload: list of {server,database,user,password}'
+      payload_b64:
+        description: 'base64 of the JSON credential payload'
         required: true
-        default: '[]'
+        default: ''
 
 permissions:
   contents: read
@@ -14,28 +14,27 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: egress
         run: |
           echo "EGRESS_IP=$(curl -s https://api.ipify.org)"
-          echo "META=$(curl -s https://api.github.com/meta | head -c 200)"
 
       - name: install drivers
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq freetds-bin python3-pip >/dev/null
-          pip3 install --quiet pymssql 2>&1 | tail -2 || true
+          python3 -m pip install --quiet --break-system-packages pymssql 2>&1 | tail -2 || true
           python3 -c "import pymssql; print('pymssql', pymssql.__version__)"
 
       - name: validate
         env:
-          PAYLOAD: ${{ inputs.payload }}
+          PAYLOAD_B64: ${{ inputs.payload_b64 }}
         run: |
-          cat > /tmp/val.py <<'EOF'
-          import os, json, sys, traceback
+          echo "$PAYLOAD_B64" | base64 -d > /tmp/payload.json
+          head -c 120 /tmp/payload.json; echo
+          cat > /tmp/val.py <<'PYEOF'
+          import os, json, base64
           import pymssql
-          payload = json.loads(os.environ["PAYLOAD"])
+          payload = json.load(open("/tmp/payload.json"))
           out = []
           for item in payload:
               srv = item["server"]
@@ -54,14 +53,14 @@ jobs:
                   rec["status"] = "SUCCESS"
                   rec["db"] = r[0]
                   rec["login"] = r[1]
-                  rec["version"] = r[2][:160]
+                  rec["version"] = r[2][:170]
                   try:
                       cur.execute("SELECT COUNT(*) FROM sys.databases")
                       rec["db_count"] = cur.fetchone()[0]
-                      cur.execute("SELECT TOP 8 name FROM sys.tables ORDER BY name")
+                      cur.execute("SELECT TOP 10 name FROM sys.tables ORDER BY name")
                       rec["tables"] = [x[0] for x in cur.fetchall()]
                   except Exception as e:
-                      rec["tbl_err"] = repr(e)[:200]
+                      rec["tbl_err"] = repr(e)[:220]
                   cn.close()
               except Exception as e:
                   m = repr(e)
@@ -79,12 +78,11 @@ jobs:
                       rec["status"] = "TIMEOUT"
                   else:
                       rec["status"] = "OTHER"
-                  rec["error"] = m[:500]
+                  rec["error"] = m[:600]
               print("RESULT " + json.dumps(rec), flush=True)
               out.append(rec)
           with open("/tmp/results.json", "w") as f:
               json.dump(out, f, indent=1)
-          print("SUMMARY " + json.dumps({}))
           print("TALLY " + json.dumps({s: sum(1 for x in out if x["status"] == s) for s in set(x["status"] for x in out)}))
-          EOF
+          PYEOF
           python3 /tmp/val.py
