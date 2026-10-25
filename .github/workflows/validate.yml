@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
       - name: egress
@@ -21,12 +21,14 @@ jobs:
 
       - name: install mssql odbc
         run: |
+          set -x
           curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
-          curl -fsSL https://packages.microsoft.com/config/ubuntu/24.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
-          sudo apt-get update -qq
-          sudo ACCEPT_EAGERLY=Y apt-get install -y -qq msodbcsql18 unixodbc-dev >/dev/null
-          python3 -m pip install --quiet --break-system-packages pyodbc 2>&1 | tail -2 || true
-          odbcinst -q -d 2>&1 | head -5
+          curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EAGERLY=Y apt-get install -y msodbcsql18 unixodbc-dev
+          odbcinst -q -d
+          python3 -m pip install --quiet pyodbc
+          python3 -c "import pyodbc; print('pyodbc', pyodbc.version); print(pyodbc.drivers())"
 
       - name: validate
         env:
