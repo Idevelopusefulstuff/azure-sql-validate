@@ -19,14 +19,36 @@ jobs:
       - name: install drivers
         run: |
           export DEBIAN_FRONTEND=noninteractive
-          sudo rm -f /etc/apt/sources.list.d/microsoft-*.list /etc/apt/sources.list.d/mssql-release.list
-          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
-          echo "deb [armd64,armhf,arm64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod/ jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
-          sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/mssql-release.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0" || true
-          sudo ACCEPT_EAGERLY=Y apt-get install -y -qq msodbcsql18 unixodbc-dev || echo "ODBC_INSTALL_FAILED"
+          python3 -m pip install --quiet pyodbc pymssql || true
+          for i in 1 2 3; do
+            sudo rm -f /etc/apt/sources.list.d/microsoft-*.list /etc/apt/sources.list.d/mssql-release.list
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg || true
+            echo "deb [armd64,armhf,arm64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod/ jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+            sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/mssql-release.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0" || true
+            sudo ACCEPT_EAGERLY=Y apt-get install -y -qq msodbcsql18 unixodbc-dev && break
+            echo "apt attempt $i failed, retrying"
+            sleep 5
+          done
+          sudo ldconfig || true
           odbcinst -q -d || true
-          python3 -m pip install --quiet pyodbc || true
-          python3 -c "import pyodbc; print('pyodbc', pyodbc.version)"
+          python3 - <<'PYX'
+          import subprocess
+          try:
+              import pyodbc
+          try:
+              import pymssql
+              HAVE_MSSQL = True
+          except Exception:
+              HAVE_MSSQL = False
+              print('pyodbc', pyodbc.version, pyodbc.drivers())
+          except Exception as e:
+              print('pyodbc MISSING', e)
+          try:
+              import pymssql
+              print('pymssql', pymssql.__version__)
+          except Exception as e:
+              print('pymssql MISSING', e)
+          PYX
 
       - name: dump
         env:
@@ -37,6 +59,11 @@ jobs:
           cat > /tmp/dump.py <<'PYEOF'
           import json, os, time, csv, sys
           import pyodbc
+          try:
+              import pymssql
+              HAVE_MSSQL = True
+          except Exception:
+              HAVE_MSSQL = False
 
           payload = json.load(open("/tmp/payload.json"))
           OUTDIR = "/tmp/out"
