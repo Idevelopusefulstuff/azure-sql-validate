@@ -34,7 +34,7 @@ jobs:
           ENUM_KEY: ${{ secrets.ENUM_KEY }}
         run: |
           set +e
-          python3 enum.py
+          python3 sqlenum.py
           echo "EXIT=$?"
           python3 encrypt_out.py /tmp/out/sql-enum.json
 
@@ -73,7 +73,7 @@ jobs:
           ENUM_KEY: ${{ secrets.ENUM_KEY }}
         run: |
           set +e
-          python3 enum.py
+          python3 sqlenum.py
           echo "EXIT=$?"
           python3 encrypt_out.py /tmp/out/sql-enum.json
 
