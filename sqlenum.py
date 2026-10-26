@@ -103,9 +103,38 @@ CORE_QUERIES = [
      "FROM sys.server_principals ORDER BY name"),
     ("credentials",
      "SELECT TOP 200 name, credential_identity, create_date FROM sys.credentials ORDER BY name"),
+    ("db_scoped_credentials",
+     "SELECT credential_id, name, credential_identity, create_date "
+     "FROM sys.database_scoped_credentials ORDER BY name"),
+    ("external_data_sources",
+     "SELECT external_data_source_id, name, type_desc, location, credential_id "
+     "FROM sys.external_data_sources ORDER BY name"),
+    ("external_tables",
+     "SELECT object_id, SCHEMA_NAME(schema_id) AS sch, name, data_source_id, location, "
+     "CAST(1 AS int) AS present FROM sys.external_tables ORDER BY name"),
+    ("symmetric_keys",
+     "SELECT name, key_length, algorithm_desc, create_date, is_open FROM sys.symmetric_keys"),
+    ("certificates",
+     "SELECT name, subject, start_date, expiry_date FROM sys.certificates ORDER BY name"),
+    ("crypt_properties",
+     "SELECT class_desc, OBJECT_NAME(major_id) AS object_name, thumbprint FROM sys.crypt_properties"),
+    ("sessions_active",
+     "SELECT TOP 200 session_id, login_name, nt_user_name, host_name, program_name, "
+     "client_interface_name, status, DB_NAME(database_id) AS db FROM sys.dm_exec_sessions "
+     "WHERE is_user_process = 1 ORDER BY session_id"),
+    ("connections_active",
+     "SELECT TOP 200 session_id, client_net_address, local_net_address, protocol_type, "
+     "auth_scheme, net_transport, encrypt_option FROM sys.dm_exec_connections"),
     ("linked_servers",
      "SELECT name, product, provider, data_source, location, is_linked, "
      "is_remote_login_enabled, is_rpc_out_enabled FROM sys.servers"),
+    ("remote_logins",
+     "SELECT s.name AS srv_name, ll.remote_name, ll.local_principal_id "
+     "FROM sys.linked_logins ll JOIN sys.servers s ON s.server_id = ll.server_id"),
+    ("external_file_formats",
+     "SELECT file_format_id, name, format_type, data_compression FROM sys.external_file_formats"),
+    ("crossdb_test",
+     "SELECT TOP 1 name FROM master.sys.databases"),
     ("synonyms",
      "SELECT TOP 300 SCHEMA_NAME(schema_id) AS sch, name, base_object_name "
      "FROM sys.synonyms ORDER BY name"),
@@ -201,7 +230,6 @@ def main():
         rec["connect_status"] = "SUCCESS"
         try:
             cur = cn.cursor()
-            cur.timeout = 60
             for name, sql in CORE_QUERIES:
                 try:
                     data = rows_of(cur, sql)
