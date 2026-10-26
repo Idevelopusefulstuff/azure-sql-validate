@@ -1,0 +1,47 @@
+name: sql-deep
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deep:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: drivers
+        run: |
+          set +e
+          export DEBIAN_FRONTEND=noninteractive
+          sudo rm -f /etc/apt/sources.list.d/microsoft-*.list
+          sudo rm -f /etc/apt/sources.list.d/mssql-release.list
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+          echo "deb [arch=amd64,armhf,arm64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod/ jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list >/dev/null
+          sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/mssql-release.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
+          sudo ACCEPT_EAGERLY=Y apt-get install -y -qq msodbcsql18 unixodbc-dev
+          sudo ldconfig
+          odbcinst -q -d
+          python3 -m pip install --quiet pyodbc
+          python3 -c "import pyodbc;print('PYODBC',pyodbc.version,pyodbc.drivers())"
+
+      - name: deep
+        env:
+          PAYLOAD_B64: ${{ secrets.ENUM_PAYLOAD_B64 }}
+          ENUM_KEY: ${{ secrets.ENUM_KEY }}
+        run: |
+          set +e
+          python3 deep.py
+          echo "EXIT=$?"
+          python3 encrypt_out.py /tmp/out/sql-enum.json
+
+      - name: upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deep-enc
+          path: /tmp/out.enc
+          retention-days: 2
