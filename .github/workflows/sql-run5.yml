@@ -1,0 +1,42 @@
+name: sql-run5
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: drivers
+        run: |
+          set +e
+          sudo rm -f /etc/apt/sources.list.d/microsoft-*.list /etc/apt/sources.list.d/mssql-release.list
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+          echo "deb [arch=amd64,armhf,arm64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod/ jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list >/dev/null
+          sudo apt-get update -qq
+          sudo ACCEPT_EAGERLY=Y apt-get install -y -qq msodbcsql18 unixodbc-dev
+          sudo ldconfig
+          python3 -m pip install --quiet pyodbc cryptography
+          python3 -c "import pyodbc;print('PYODBC',pyodbc.version)"
+      - name: run
+        env:
+          PAYLOAD_B64: ${{ secrets.RUN5_PAYLOAD_B64 }}
+          ENUM_KEY: ${{ secrets.ENUM_KEY }}
+          RUN5_OUT: ${{ secrets.RUN5_OUT }}
+        run: |
+          set +e
+          python3 runner_script5.py
+          echo "EXIT=$?"
+          python3 encrypt_out.py "/tmp/out/${RUN5_OUT:-pull.json}"
+          rm -f "/tmp/out/${RUN5_OUT:-pull.json}"
+      - name: upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run5-enc
+          path: /tmp/out.enc
+          retention-days: 5
