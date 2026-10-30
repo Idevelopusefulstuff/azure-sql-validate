@@ -119,6 +119,7 @@ def err_detail(e):
     if resp is not None:
         try:
             d["xms"] = resp.headers.get("x-ms-error-code")
+            d["body"] = resp.text()[:900]
         except Exception:
             pass
     return d
