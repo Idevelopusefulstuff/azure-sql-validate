@@ -1,0 +1,49 @@
+name: w32-sql-inventory
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'inventory'
+        required: true
+        default: 'inventory'
+
+permissions:
+  contents: read
+
+jobs:
+  inv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: egress identity
+        run: |
+          echo "RUNNER_IP=$(curl -s --max-time 15 https://api.ipify.org || true)"
+          curl -s --max-time 15 https://ipinfo.io/json | head -c 300 || true
+          echo
+
+      - name: odbc
+        run: |
+          sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends unixodbc-dev >/dev/null 2>&1 || true
+          python3 -m pip install --quiet --disable-pip-version-check pyodbc cryptography
+          python3 -c "import pyodbc;print('DRIVERS',pyodbc.drivers())"
+
+      - name: run
+        env:
+          W32_USER: ${{ secrets.W32_USER }}
+          W32_PWD: ${{ secrets.W32_PWD }}
+          W32_KEY: ${{ secrets.W32_KEY }}
+        run: |
+          set +e
+          python3 w32_sql_inventory.py
+          echo "EXIT=$?"
+
+      - name: upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w32-inventory-${{ github.run_id }}
+          path: /tmp/out.enc
+          retention-days: 2
+          if-no-files-found: warn
