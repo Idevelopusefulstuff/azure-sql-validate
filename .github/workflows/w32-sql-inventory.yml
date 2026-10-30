@@ -25,8 +25,15 @@ jobs:
 
       - name: odbc
         run: |
-          sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends unixodbc-dev >/dev/null 2>&1 || true
           python3 -m pip install --quiet --disable-pip-version-check pyodbc cryptography
+          if [ -z "$(python3 -c "import pyodbc;print(' '.join(pyodbc.drivers()))" 2>/dev/null)" ]; then
+            curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+            . /etc/os-release
+            echo "ubuntu=${VERSION_ID}"
+            curl -sSL "https://packages.microsoft.com/config/ubuntu/${VERSION_ID}/prod.list" | sudo tee /etc/apt/sources.list.d/mssql-release.list >/dev/null
+            sudo apt-get update -qq
+            sudo ACCEPT_EULA=Y apt-get install -y -qq msodbcsql18 unixodbc-dev
+          fi
           python3 -c "import pyodbc;print('DRIVERS',pyodbc.drivers())"
 
       - name: run
