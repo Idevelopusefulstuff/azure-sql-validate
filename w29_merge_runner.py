@@ -1,4 +1,4 @@
-"""W29 Azure-runner: read-only dump of the H-POD merge-data tables.
+﻿"""W29 Azure-runner: read-only dump of the H-POD merge-data tables.
 
 Runs inside a GitHub-hosted (Azure-boundary) runner because the SQL server's
 firewall only admits Azure services (error 40615 from every other egress).
@@ -215,7 +215,8 @@ def encrypt_out(key_b64):
 def main():
     mode = os.environ.get("MERGE_MODE", "schema")
     label = os.environ["MERGE_LABEL"]
-    payload = json.loads(base64.b64decode(os.environ["MERGE_PAYLOAD_B64"]).decode())
+    raw = os.environ["MERGE_PAYLOAD_B64"].strip()
+    payload = json.loads(raw) if raw.startswith("{") else json.loads(base64.b64decode(raw).decode())
     tgt = payload["targets"][label]
     tables = payload["tables"]
     os.makedirs(OUT, exist_ok=True)
@@ -252,3 +253,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
