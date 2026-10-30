@@ -212,6 +212,46 @@ def encrypt_out(key_b64):
             pass
 
 
+def classify(exc):
+    m = str(exc)
+    if "40615" in m:
+        return "FIREWALL_40615"
+    if "18456" in m:
+        return "LOGIN_18456"
+    if "4060" in m:
+        return "DB_4060"
+    if "timeout" in m.lower() or "HYT00" in m:
+        return "TIMEOUT"
+    return "OTHER"
+
+
+def probe_all(probes):
+    """Firewall-vs-login discrimination: 40615 = blocked, 18456 = path open."""
+    results = []
+    for pr in probes:
+        for cred in pr["creds"]:
+            try:
+                cn = connect(pr["server"], pr.get("database", "master"), cred["user"], cred["password"])
+            except Exception as exc:  # noqa: BLE001
+                rec = {"server": pr["server"], "user": cred["user"].split("@")[0],
+                       "class": classify(exc), "msg": str(exc).replace(cred["password"], "<R>")[:150]}
+                results.append(rec)
+                print("PROBE " + json.dumps(rec), flush=True)
+                continue
+            try:
+                cur = cn.cursor()
+                cur.execute("SELECT name FROM sys.databases ORDER BY name")
+                dbs = [r[0] for r in cur.fetchall()]
+            except Exception as exc:  # noqa: BLE001
+                dbs = ["<enum_failed:%s>" % str(exc)[:60]]
+            rec = {"server": pr["server"], "user": cred["user"].split("@")[0],
+                   "class": "LOGIN_OK", "databases": dbs}
+            results.append(rec)
+            print("PROBE " + json.dumps(rec), flush=True)
+            cn.close()
+    return results
+
+
 def main():
     mode = os.environ.get("MERGE_MODE", "schema")
     label = os.environ["MERGE_LABEL"]
@@ -223,6 +263,14 @@ def main():
 
     started = time.time()
     print("LABEL %s MODE %s" % (label, mode), flush=True)
+    if mode == "probe":
+        if label != "A":
+            print("SKIP non-A label for probe", flush=True)
+            return 0
+        probe_all(payload.get("probes", []))
+        print("PROBE_DONE", flush=True)
+        encrypt_out(os.environ["MERGE_KEY"])
+        return 0
     cn, used_login, errors = open_db(tgt)
     if cn is None:
         print("CONNECT_FAIL " + json.dumps({"label": label, "database": tgt["database"], "errors": errors}), flush=True)
