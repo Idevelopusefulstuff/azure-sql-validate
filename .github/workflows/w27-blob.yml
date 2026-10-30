@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        label: ${{ fromJSON(github.event.inputs.labels_json) }}
+        label: ["F"]
     steps:
       - uses: actions/checkout@v4
 
