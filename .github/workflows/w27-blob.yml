@@ -6,6 +6,10 @@ on:
         description: 'preflight | harvest'
         required: true
         default: 'preflight'
+      labels_json:
+        description: 'JSON array of labels'
+        required: false
+        default: '["A","B","C","D","E"]'
 
 permissions:
   contents: read
@@ -17,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        label: ["A", "B", "C", "D", "E"]
+        label: ${{ fromJSON(github.event.inputs.labels_json) }}
     steps:
       - uses: actions/checkout@v4
 
